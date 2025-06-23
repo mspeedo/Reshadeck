@@ -14,77 +14,50 @@ import {
     Dropdown,
     DropdownOption,
     SingleDropdownOption,
+	SliderField
 } from "decky-frontend-lib";
-import { VFC, useState, useEffect } from "react";
+import { VFC, useState, useEffect, useRef  } from "react";
 import { MdWbShade } from "react-icons/md";
 import logo from "../assets/logo.png";
 
+// Global refresh function reference
+let forceRefreshContent: (() => void) | null = null;
 
 class ReshadeckLogic {
     serverAPI: ServerAPI;
     dataTakenAt: number = Date.now();
-    screensaverActive: boolean = false;
 
     constructor(serverAPI: ServerAPI) {
         this.serverAPI = serverAPI;
     }
-
-    handleButtonInput = async (val: any[]) => {
-        if (!this.screensaverActive) {
-            return;
-        }
-        let cancel = false;
-        const { flSoftwareGyroDegreesPerSecondPitch,
-            flSoftwareGyroDegreesPerSecondYaw,
-            flSoftwareGyroDegreesPerSecondRoll,
-            ulButtons,
-            sLeftStickX,
-            sLeftStickY,
-            sRightStickX,
-            sRightStickY,
-        } = val[0];
-        if (ulButtons != 0) { cancel = true; }
-        if (Math.abs(sLeftStickX) > 5000 || Math.abs(sLeftStickY) > 5000 ||
-            Math.abs(sRightStickX) > 5000 || Math.abs(sRightStickY) > 5000) {
-            cancel = true;
-        }
-
-        if (!cancel && Date.now() - this.dataTakenAt < 1000) {
-            return;
-        }
-        this.dataTakenAt = Date.now();
-        let degrees = 10;
-        if (!cancel && Math.abs(flSoftwareGyroDegreesPerSecondPitch) > degrees ||
-            Math.abs(flSoftwareGyroDegreesPerSecondYaw) > degrees ||
-            Math.abs(flSoftwareGyroDegreesPerSecondRoll) > degrees) {
-            cancel = true;
-        }
-
-        if (cancel) {
-            await this.serverAPI.callPluginMethod("apply_shader", { "screensaver": false });
-            await this.serverAPI.toaster.toast({
-                title: "Waking Up Screen",
-                body: "Waking Up Screen",
-                duration: 100,
-                critical: true
-            });
-            this.screensaverActive = false;
-        }
-    }
-
-    handleSuspend = async (val: any) => {
-        await this.serverAPI.callPluginMethod("apply_shader", { "screensaver": false });
-    }
+	
+	handleSuspend = async () => {
+		// Do nothing or log if you want
+	};
+	
+	handleResume = async () => {
+		await this.serverAPI.callPluginMethod("apply_shader", {});
+	};
 }
 
-const Content: VFC<{ serverAPI: ServerAPI, logic: ReshadeckLogic }> = ({ serverAPI, logic }) => {
+const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
     const baseShader = { data: "None", label: "No Shader" } as SingleDropdownOption;
-    const baseScreensaver = { data: "None", label: "No Screensaver" } as SingleDropdownOption;
+    const [shadersEnabled, setShadersEnabled] = useState<boolean>(false);
     const [shader_list, set_shader_list] = useState<string[]>([]);
     const [selectedShader, setSelectedShader] = useState<DropdownOption>(baseShader);
     const [shaderOptions, setShaderOptions] = useState<DropdownOption[]>([baseShader]);
-    const [selectedScreenSaver, setSelectedScreenSaver] = useState<DropdownOption>(baseShader);
-    const [screenSaverOptions, setScreenSaverOptions] = useState<DropdownOption[]>([baseScreensaver]);
+	const [currentGameId, setCurrentGameId] = useState<string>("Unknown");
+	const [currentGameName, setCurrentGameName] = useState<string>("Unknown");
+	const [currentEffect, setCurrentEffect] = useState<string>("");
+	const [contrast, setContrast] = useState<number>(0.0);
+    const [sharpness, setSharpness] = useState<number>(1.0);
+	const contrastTimeout = useRef<number | null>(null);
+	const sharpnessTimeout = useRef<number | null>(null);
+	const [applyDisabled, setApplyDisabled] = useState(false);
+
+    // --- Add refreshVersion state for UI refreshes ---
+    const [refreshVersion, setRefreshVersion] = useState(0);
+    forceRefreshContent = () => setRefreshVersion(v => v + 1);
 
     const getShaderOptions = (le_list: string[], baseShaderOrSS: any) => {
         let options: DropdownOption[] = [];
@@ -95,27 +68,86 @@ const Content: VFC<{ serverAPI: ServerAPI, logic: ReshadeckLogic }> = ({ serverA
         }
         return options;
     }
-
+	
+	const refreshCurrentGameInfo = async () => {
+	const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
+	const appname = `${Router.MainRunningApp?.display_name || "Unknown"}`;
+	setCurrentGameId(appid);
+	setCurrentGameName(appname);
+	
+	await serverAPI.callPluginMethod("set_current_game_info", {
+		appid,
+		appname
+	});
+	};
+	
     const initState = async () => {
+		await refreshCurrentGameInfo();
+		
         let shader_list = (await serverAPI.callPluginMethod("get_shader_list", {})).result as string[];
-        let screensaver_list = (await serverAPI.callPluginMethod("get_screensaver_list", {})).result as string[];
         set_shader_list(shader_list)
         setShaderOptions(getShaderOptions(shader_list, baseShader));
-        setScreenSaverOptions(getShaderOptions(screensaver_list, baseScreensaver));
+		
+        let enabledResp = await serverAPI.callPluginMethod("get_shader_enabled", {});
+        let isEnabled: boolean = enabledResp.result === true || enabledResp.result === "true";
+        setShadersEnabled(isEnabled);
 
         let curr = await serverAPI.callPluginMethod("get_current_shader", {});
         setSelectedShader({ data: curr.result, label: (curr.result == "0" ? "None" : curr.result) } as SingleDropdownOption);
+		
+		let eff = await serverAPI.callPluginMethod("get_current_effect", {});
+		setCurrentEffect((eff.result as { effect: string }).effect || "");
 
-        let currSS = await serverAPI.callPluginMethod("get_current_screensaver", {});
-        setSelectedScreenSaver({ data: currSS.result, label: (currSS.result == "0" ? "None" : currSS.result) } as SingleDropdownOption);
+		let contrastResp = await serverAPI.callPluginMethod("get_contrast", {});
+		let cVal = Number(contrastResp.result);
+		if (!isNaN(cVal)) {
+			setContrast(parseFloat(cVal.toFixed(6)));
+		}
+		
+		let sharpnessResp = await serverAPI.callPluginMethod("get_sharpness", {});
+		let sVal = Number(sharpnessResp.result);
+		if (!isNaN(sVal)) {
+			setSharpness(parseFloat(sVal.toFixed(6)));
+		}
     }
 
+    // --- Init state on mount and on refreshVersion bump ---
     useEffect(() => {
         initState();
-    }, []);
-
+    }, [refreshVersion]);
+	
     return (
-        <PanelSection title="Select Shader">
+        <PanelSection>
+			<PanelSectionRow>
+				<b>Current Running App</b>
+			</PanelSectionRow>
+			<PanelSectionRow>
+			<div>
+				<div><b>ID:</b> {currentGameId}</div>
+				<div><b>Name:</b> {currentGameName}</div>
+				<div><b>Shader:</b> {currentEffect}</div>
+			</div>
+			</PanelSectionRow>
+            <PanelSectionRow>
+              <ToggleField
+                label="Enable Shaders"
+                checked={shadersEnabled}
+                onChange={async (enabled: boolean) => {
+					setShadersEnabled(enabled);
+					await serverAPI.callPluginMethod("set_shader_enabled", { isEnabled: enabled });
+					if (enabled) {
+					await serverAPI.callPluginMethod("toggle_shader", { shader_name: selectedShader.data });
+					} else {
+					await serverAPI.callPluginMethod("toggle_shader", { shader_name: "None" });
+					}
+					let eff = await serverAPI.callPluginMethod("get_current_effect", {});
+					setCurrentEffect((eff.result as { effect: string }).effect || "");
+                }}
+              />
+            </PanelSectionRow>
+			<PanelSectionRow>
+                <b>Select Shader</b>
+            </PanelSectionRow>
             <PanelSectionRow>
                 <Dropdown
                     menuLabel="Select shader"
@@ -123,40 +155,67 @@ const Content: VFC<{ serverAPI: ServerAPI, logic: ReshadeckLogic }> = ({ serverA
                     rgOptions={shaderOptions}
                     selectedOption={selectedShader}
                     onChange={async (newSelectedShader: DropdownOption) => {
+						setSelectedShader(newSelectedShader);
                         await serverAPI.callPluginMethod("set_shader", { "shader_name": newSelectedShader.data });
+						let eff = await serverAPI.callPluginMethod("get_current_effect", {});
+						setCurrentEffect((eff.result as { effect: string }).effect || "");
                     }}
                 />
             </PanelSectionRow>
             <PanelSectionRow>
-                <b>Select Screensaver</b>
+				<ButtonItem
+					disabled={applyDisabled}
+					onClick={async () => {
+						setApplyDisabled(true);
+						setTimeout(() => setApplyDisabled(false), 1000); // 1 second lockout
+						await serverAPI.callPluginMethod("apply_shader", {});
+						let eff = await serverAPI.callPluginMethod("get_current_effect", {});
+						setCurrentEffect((eff.result as { effect: string }).effect || "");
+				}}
+				>Apply Shader</ButtonItem>
             </PanelSectionRow>
+			<PanelSectionRow>
+				<b>CAS.fx parameters</b>
+			</PanelSectionRow>
+            {/* Contrast Slider */}
             <PanelSectionRow>
-                <Dropdown
-                    menuLabel="Select screensaver"
-                    strDefaultLabel={selectedScreenSaver.label as string}
-                    rgOptions={screenSaverOptions}
-                    selectedOption={selectedScreenSaver}
-                    onChange={async (newSelectedScreenSaver: DropdownOption) => {
-                        await serverAPI.callPluginMethod("set_screensaver", { "shader_name": newSelectedScreenSaver.data });
-                        setSelectedScreenSaver(newSelectedScreenSaver.data);
+                <SliderField
+                    bottomSeparator="none"
+                    label={`Contrast: ${contrast.toFixed(2)}`}
+                    min={0}
+                    max={20}
+					step={1}
+                    value={Math.round(contrast * 10)}
+					disabled={!(shadersEnabled && selectedShader.data === "CAS.fx")}
+                    onChange={async (val: number) => {
+                        const real = val / 10;
+                        setContrast(real);
+						if (contrastTimeout.current) clearTimeout(contrastTimeout.current);
+						contrastTimeout.current = window.setTimeout(() => {
+							serverAPI.callPluginMethod("set_contrast", { value: real }).catch(console.error);
+						}, 1000);
                     }}
                 />
             </PanelSectionRow>
+            {/* Sharpness Slider */}
             <PanelSectionRow>
-                <ButtonItem onClick={async () => {
-                    console.log(selectedScreenSaver);
-                    let ret = await serverAPI.callPluginMethod("apply_shader", { "screensaver": true });
-                    await serverAPI.toaster.toast({
-                        title: "Starting Screensaver",
-                        body: "Starting Screensaver",
-                        duration: 100,
-                        critical: true
-                    });
-                    setTimeout(() => {
-                        (logic as any).screensaverActive = true;
-                    }, 5000)
-                }
-                }>Start Screensaver</ButtonItem>
+                <SliderField
+                    bottomSeparator="none"
+                    label={`Sharpness: ${sharpness.toFixed(2)}`}
+                    min={0}
+                    max={20}
+					step={1}
+                    value={Math.round(sharpness * 10)}
+					disabled={!(shadersEnabled && selectedShader.data === "CAS.fx")}
+                    onChange={async (val: number) => {
+                        const real = val / 10;
+                        setSharpness(real);
+						if (sharpnessTimeout.current) clearTimeout(sharpnessTimeout.current);
+						sharpnessTimeout.current = window.setTimeout(() => {
+							serverAPI.callPluginMethod("set_sharpness", { value: real }).catch(console.error);
+						}, 1000);
+                    }}
+                />
             </PanelSectionRow>
             <PanelSectionRow>
                 <div>Place any custom shaders in <pre>~/.local/share/gamescope</pre><pre>/reshade/Shaders</pre> so that the .fx files are in the root of the Shaders folder.</div>
@@ -170,18 +229,39 @@ const Content: VFC<{ serverAPI: ServerAPI, logic: ReshadeckLogic }> = ({ serverA
 
 export default definePlugin((serverApi: ServerAPI) => {
     let logic = new ReshadeckLogic(serverApi);
-    let input_register = window.SteamClient.Input.RegisterForControllerStateChanges(logic.handleButtonInput);
-    let suspend_registers = [window.SteamClient.System.RegisterForOnSuspendRequest(logic.handleSuspend), window.SteamClient.System.RegisterForOnResumeFromSuspend(logic.handleSuspend)];
+
+	let suspend_registers = [
+		window.SteamClient.System.RegisterForOnSuspendRequest(logic.handleSuspend),
+		window.SteamClient.System.RegisterForOnResumeFromSuspend(logic.handleResume),
+	];
+
+    let lastAppId = `${Router.MainRunningApp?.appid || "Unknown"}`;
+    const interval = setInterval(async () => {
+        const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
+        const appname = `${Router.MainRunningApp?.display_name || "Unknown"}`;
+
+        if (appid !== lastAppId) {
+            lastAppId = appid;
+            await serverApi.callPluginMethod("set_current_game_info", {
+                appid,
+                appname,
+            });
+            // --- Notify UI to refresh if overlay is open ---
+            if (forceRefreshContent) forceRefreshContent();
+        }
+    }, 5000);
 
     return {
         title: <div className={staticClasses.Title}>Reshadeck</div>,
-        content: <Content serverAPI={serverApi} logic={logic} />,
+        content: <Content serverAPI={serverApi} />,
         icon: <MdWbShade />,
         onDismount() {
-            input_register.unregister();
             suspend_registers[0].unregister();
             suspend_registers[1].unregister();
+
+            clearInterval(interval);
         },
         alwaysRender: true
     };
 });
+
