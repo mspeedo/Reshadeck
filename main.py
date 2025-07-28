@@ -160,13 +160,13 @@ class Plugin:
         elif prevEnabled and not Plugin._enabled:
             await Plugin.toggle_shader(self, "None")
         elif Plugin._enabled and (Plugin._current != prevCurrent or Plugin._current == "CAS.fx"):
-            await Plugin.apply_shader(self)
+            await Plugin.apply_shader(self, force="false")
 
     async def set_shader_enabled(self, isEnabled):
         Plugin._enabled = isEnabled
         Plugin.save_config()
 
-    async def apply_shader(self):
+    async def apply_shader(self, force: str = "true"):
         if Plugin._enabled:
             shader = Plugin._current
             if shader == "CAS.fx":
@@ -174,7 +174,7 @@ class Plugin:
                 await Plugin.update_cas_shader(self)
             logger.info("Applying shader " + shader)
             try:
-                ret = subprocess.run([shaders_folder + "/set_shader.sh", shader, destination_folder], capture_output=True)
+                ret = subprocess.run([shaders_folder + "/set_shader.sh", shader, destination_folder, force], capture_output=True)
                 logger.info(ret)
             except Exception:
                 logger.exception("Apply shader")
