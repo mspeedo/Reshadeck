@@ -174,7 +174,9 @@ class Plugin:
                 await Plugin.update_cas_shader(self)
             logger.info("Applying shader " + shader)
             try:
-                ret = subprocess.run([shaders_folder + "/set_shader.sh", shader, destination_folder, force], capture_output=True)
+                env = os.environ.copy()
+                env["LD_LIBRARY_PATH"] = ""
+                ret = subprocess.run([shaders_folder + "/set_shader.sh", shader, destination_folder, force], capture_output=True, env=env)
                 logger.info(ret)
             except Exception:
                 logger.exception("Apply shader")
@@ -187,7 +189,9 @@ class Plugin:
                 await Plugin.update_cas_shader(self)
             logger.info("Setting and applying shader " + shader_name)
             try:
-                ret = subprocess.run([shaders_folder + "/set_shader.sh", shader_name, destination_folder], capture_output=True)
+                env = os.environ.copy()
+                env["LD_LIBRARY_PATH"] = ""
+                ret = subprocess.run([shaders_folder + "/set_shader.sh", shader_name, destination_folder], capture_output=True, env=env)
                 decky_plugin.logger.info(ret)
             except Exception:
                 decky_plugin.logger.exception("Set shader")
@@ -197,7 +201,9 @@ class Plugin:
             await Plugin.update_cas_shader(self)
         logger.info("Applying shader " + shader_name)
         try:
-            ret = subprocess.run([shaders_folder + "/set_shader.sh", shader_name, destination_folder], capture_output=True)
+            env = os.environ.copy()
+            env["LD_LIBRARY_PATH"] = ""
+            ret = subprocess.run([shaders_folder + "/set_shader.sh", shader_name, destination_folder], capture_output=True, env=env)
             decky_plugin.logger.info(ret)
         except Exception:
             decky_plugin.logger.exception("Toggle shader")
