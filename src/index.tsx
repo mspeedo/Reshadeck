@@ -36,7 +36,7 @@ class ReshadeckLogic {
 	};
 	
 	handleResume = async () => {
-		await this.serverAPI.callPluginMethod("apply_shader", {});
+//		await this.serverAPI.callPluginMethod("apply_shader", {});
 	};
 }
 
@@ -228,12 +228,11 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 };
 
 export default definePlugin((serverApi: ServerAPI) => {
-    let logic = new ReshadeckLogic(serverApi);
-
-	let suspend_registers = [
-		window.SteamClient.System.RegisterForOnSuspendRequest(logic.handleSuspend),
-		window.SteamClient.System.RegisterForOnResumeFromSuspend(logic.handleResume),
-	];
+	let logic = new ReshadeckLogic(serverApi);
+//	let suspend_registers = [
+//		window.SteamClient.System.RegisterForOnSuspendRequest(logic.handleSuspend),
+//		window.SteamClient.System.RegisterForOnResumeFromSuspend(logic.handleResume),
+//	];
 
     let lastAppId = `${Router.MainRunningApp?.appid || "Unknown"}`;
     const interval = setInterval(async () => {
@@ -256,8 +255,8 @@ export default definePlugin((serverApi: ServerAPI) => {
         content: <Content serverAPI={serverApi} />,
         icon: <MdWbShade />,
         onDismount() {
-            suspend_registers[0].unregister();
-            suspend_registers[1].unregister();
+        //    suspend_registers[0].unregister();
+        //    suspend_registers[1].unregister();
 
             clearInterval(interval);
         },
