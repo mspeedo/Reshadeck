@@ -27,6 +27,11 @@ interface ShaderParameter {
     step: number;
 }
 
+const getCurrentGameInfo = () => ({
+    appid: `${Router.MainRunningApp?.appid || "Unknown"}`,
+    appname: `${Router.MainRunningApp?.display_name || "Unknown"}`
+});
+
 const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
     const baseShader = { data: "None", label: "No Shader" } as SingleDropdownOption;
     const [shadersEnabled, setShadersEnabled] = useState<boolean>(false);
@@ -90,20 +95,10 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         setHasParameterOverrides(overrideResponse.result === true || overrideResponse.result === "true");
     };
 
-    const refreshCurrentGameInfo = async () => {
-        const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
-        const appname = `${Router.MainRunningApp?.display_name || "Unknown"}`;
+    const initState = async () => {
+        const { appid, appname } = getCurrentGameInfo();
         setCurrentGameId(appid);
         setCurrentGameName(appname);
-
-        await serverAPI.callPluginMethod("set_current_game_info", {
-            appid,
-            appname
-        });
-    };
-
-    const initState = async () => {
-        await refreshCurrentGameInfo();
 
         const shaderList = (await serverAPI.callPluginMethod("get_shader_list", {})).result as string[];
         setShaderOptions(getShaderOptions(shaderList, baseShader));
@@ -312,20 +307,24 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 };
 
 export default definePlugin((serverApi: ServerAPI) => {
-    let lastAppId = `${Router.MainRunningApp?.appid || "Unknown"}`;
+    let lastAppId: string | null = null;
 
-    const interval = setInterval(async () => {
-        const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
-        const appname = `${Router.MainRunningApp?.display_name || "Unknown"}`;
+    const syncCurrentGameInfo = async () => {
+        const { appid, appname } = getCurrentGameInfo();
+        if (appid === lastAppId) return;
 
-        if (appid !== lastAppId) {
-            lastAppId = appid;
-            await serverApi.callPluginMethod("set_current_game_info", {
-                appid,
-                appname
-            });
-            if (forceRefreshContent) forceRefreshContent();
-        }
+        await serverApi.callPluginMethod("set_current_game_info", {
+            appid,
+            appname
+        });
+        lastAppId = appid;
+        if (forceRefreshContent) forceRefreshContent();
+    };
+
+    void syncCurrentGameInfo().catch(error => console.error(error));
+
+    const interval = setInterval(() => {
+        void syncCurrentGameInfo().catch(error => console.error(error));
     }, 5000);
 
     return {
