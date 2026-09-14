@@ -97,7 +97,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         setCurrentGameName(appname);
 
         // Lifecycle hooks normally keep backend game state current. This one-shot
-        // sync also makes opening the UI self-healing after a plugin reload.
+        // sync also recovers if a game-change event was missed.
         await serverAPI.callPluginMethod("set_current_game_info", {
             appid,
             appname
@@ -106,6 +106,11 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 
     const initState = async () => {
         await refreshCurrentGameInfo();
+
+        // Opening the UI is an explicit recovery point. Verify the actual active
+        // shader contents against the saved state and repair only if they differ.
+        const reconcile = await serverAPI.callPluginMethod("reconcile_shader_state", {});
+        const reconciledEffect = (reconcile.result as { effect?: string })?.effect || "";
 
         const shaderList = (await serverAPI.callPluginMethod("get_shader_list", {})).result as string[];
         setShaderOptions(getShaderOptions(shaderList, baseShader));
@@ -122,8 +127,12 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         } as SingleDropdownOption);
         await loadShaderParameters(currentShader);
 
-        const eff = await serverAPI.callPluginMethod("get_current_effect", {});
-        setCurrentEffect((eff.result as { effect: string }).effect || "");
+        if (reconciledEffect) {
+            setCurrentEffect(reconciledEffect);
+        } else {
+            const eff = await serverAPI.callPluginMethod("get_current_effect", {});
+            setCurrentEffect((eff.result as { effect: string }).effect || "");
+        }
     };
 
     useEffect(() => {
