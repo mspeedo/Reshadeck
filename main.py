@@ -7,6 +7,7 @@ import shutil
 import asyncio
 import re
 import tempfile
+import math
 
 logger = decky_plugin.logger
 
@@ -444,34 +445,50 @@ class Plugin:
                 except OSError:
                     pass
 
-    async def set_shader_parameter(
-        self,
-        shader_name: str,
-        parameter_name: str,
-        value: float,
-    ):
+    async def set_shader_parameters(self, shader_name: str, values: dict):
+        if not isinstance(values, dict):
+            return False
+
         definitions = {p["name"]: p for p in Plugin._parse_shader_parameters(shader_name)}
-        definition = definitions.get(parameter_name)
-        if definition is None:
-            logger.warning(f"Unknown shader parameter {parameter_name} for {shader_name}")
+        if not definitions:
             return False
 
-        try:
-            numeric_value = float(value)
-        except (TypeError, ValueError):
-            return False
+        stored = dict(Plugin._stored_parameters_for(shader_name))
+        changed = False
 
-        numeric_value = max(
-            float(definition["min"]),
-            min(float(definition["max"]), numeric_value),
-        )
+        for name, raw_value in values.items():
+            definition = definitions.get(name)
+            if definition is None:
+                continue
 
-        if shader_name not in Plugin._shader_parameters or not isinstance(
-            Plugin._shader_parameters[shader_name], dict
-        ):
-            Plugin._shader_parameters[shader_name] = {}
+            try:
+                numeric_value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
 
-        Plugin._shader_parameters[shader_name][parameter_name] = numeric_value
+            numeric_value = max(
+                float(definition["min"]),
+                min(float(definition["max"]), numeric_value),
+            )
+            default_value = float(definition["value"])
+            effective_value = float(stored.get(name, default_value))
+
+            if math.isclose(numeric_value, effective_value, rel_tol=0.0, abs_tol=1e-9):
+                continue
+
+            changed = True
+            if math.isclose(numeric_value, default_value, rel_tol=0.0, abs_tol=1e-9):
+                stored.pop(name, None)
+            else:
+                stored[name] = numeric_value
+
+        if not changed:
+            return True
+
+        if stored:
+            Plugin._shader_parameters[shader_name] = stored
+        else:
+            Plugin._shader_parameters.pop(shader_name, None)
         Plugin.save_config()
 
         if Plugin._enabled and Plugin._current == shader_name:
@@ -480,6 +497,17 @@ class Plugin:
                 force_reload=True,
             )
         return True
+
+    async def set_shader_parameter(
+        self,
+        shader_name: str,
+        parameter_name: str,
+        value: float,
+    ):
+        return await self.set_shader_parameters(
+            shader_name,
+            {parameter_name: value},
+        )
 
     async def reset_shader_parameters(self, shader_name: str):
         shader_name = str(shader_name)
