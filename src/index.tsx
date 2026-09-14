@@ -36,6 +36,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
     const [currentGameName, setCurrentGameName] = useState<string>("Unknown");
     const [currentEffect, setCurrentEffect] = useState<string>("");
     const [shaderParameters, setShaderParameters] = useState<ShaderParameter[]>([]);
+    const [hasParameterOverrides, setHasParameterOverrides] = useState(false);
     const parameterTimeout = useRef<number | null>(null);
     const pendingParameterValues = useRef<Record<string, number>>({});
     const [reloadDisabled, setReloadDisabled] = useState(false);
@@ -63,13 +64,22 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
     const loadShaderParameters = async (shaderName: string) => {
         if (!shaderName || shaderName === "None") {
             setShaderParameters([]);
+            setHasParameterOverrides(false);
             return;
         }
 
-        const response = await serverAPI.callPluginMethod("get_shader_parameters", {
-            shader_name: shaderName
-        });
-        const parameters = Array.isArray(response.result) ? response.result as ShaderParameter[] : [];
+        const [parameterResponse, overrideResponse] = await Promise.all([
+            serverAPI.callPluginMethod("get_shader_parameters", {
+                shader_name: shaderName
+            }),
+            serverAPI.callPluginMethod("has_shader_parameter_overrides", {
+                shader_name: shaderName
+            })
+        ]);
+
+        const parameters = Array.isArray(parameterResponse.result)
+            ? parameterResponse.result as ShaderParameter[]
+            : [];
         setShaderParameters(parameters.map(parameter => ({
             ...parameter,
             value: Number(parameter.value),
@@ -77,6 +87,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
             max: Number(parameter.max),
             step: Number(parameter.step)
         })));
+        setHasParameterOverrides(overrideResponse.result === true || overrideResponse.result === "true");
     };
 
     const refreshCurrentGameInfo = async () => {
@@ -131,6 +142,8 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         return decimal === -1 ? 0 : text.length - decimal - 1;
     };
 
+    const reloadUnavailable = !shadersEnabled || String(selectedShader.data) === "None";
+
     return (
         <PanelSection>
             <PanelSectionRow>
@@ -182,7 +195,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
             </PanelSectionRow>
             <PanelSectionRow>
                 <ButtonItem
-                    disabled={reloadDisabled}
+                    disabled={reloadDisabled || reloadUnavailable}
                     onClick={async () => {
                         setReloadDisabled(true);
                         try {
@@ -227,6 +240,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                                 setShaderParameters(current => current.map(item =>
                                     item.name === parameter.name ? { ...item, value: realValue } : item
                                 ));
+                                setHasParameterOverrides(true);
 
                                 pendingParameterValues.current[parameter.name] = realValue;
                                 if (parameterTimeout.current !== null) {
@@ -244,6 +258,13 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                                             shader_name: shaderName,
                                             values
                                         });
+                                        const overrideResponse = await serverAPI.callPluginMethod(
+                                            "has_shader_parameter_overrides",
+                                            { shader_name: shaderName }
+                                        );
+                                        setHasParameterOverrides(
+                                            overrideResponse.result === true || overrideResponse.result === "true"
+                                        );
                                         const eff = await serverAPI.callPluginMethod("get_current_effect", {});
                                         setCurrentEffect((eff.result as { effect: string }).effect || "");
                                     } catch (error) {
@@ -259,7 +280,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
             {shaderParameters.length > 0 && (
                 <PanelSectionRow>
                     <ButtonItem
-                        disabled={resetDisabled}
+                        disabled={resetDisabled || !hasParameterOverrides}
                         onClick={async () => {
                             clearParameterTimeout();
                             setResetDisabled(true);
