@@ -64,11 +64,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         parameterTimeouts.current = {};
     };
 
-    // App changes invalidate pending slider callbacks before backend state changes.
-    forceRefreshContent = () => {
-        clearParameterTimeouts();
-        setRefreshVersion(v => v + 1);
-    };
+    forceRefreshContent = () => setRefreshVersion(v => v + 1);
 
     const getShaderOptions = (le_list: string[], baseShaderOrSS: any) => {
         let options: DropdownOption[] = [];
@@ -245,8 +241,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                                 ));
 
                                 const shaderName = String(selectedShader.data);
-                                const appIdAtChange = currentGameId;
-                                const timeoutKey = `${appIdAtChange}:${shaderName}:${parameter.name}`;
+                                const timeoutKey = `${shaderName}:${parameter.name}`;
                                 if (parameterTimeouts.current[timeoutKey]) {
                                     clearTimeout(parameterTimeouts.current[timeoutKey]);
                                 }
@@ -255,8 +250,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                                         await serverAPI.callPluginMethod("set_shader_parameter", {
                                             shader_name: shaderName,
                                             parameter_name: parameter.name,
-                                            value: realValue,
-                                            appid: appIdAtChange
+                                            value: realValue
                                         });
                                         const eff = await serverAPI.callPluginMethod("get_current_effect", {});
                                         setCurrentEffect((eff.result as { effect: string }).effect || "");
@@ -294,7 +288,7 @@ export default definePlugin((serverApi: ServerAPI) => {
             // initState() performs the one and only set_current_game_info RPC.
             if (forceRefreshContent) forceRefreshContent();
         }
-    }, 1000);
+    }, 5000);
 
     return {
         title: <div className={staticClasses.Title}>Reshadeck</div>,
