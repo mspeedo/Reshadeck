@@ -96,7 +96,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         setCurrentGameId(appid);
         setCurrentGameName(appname);
 
-        // The background poller normally keeps backend game state current.
+        // Background lifecycle hooks normally keep backend game state current.
         // This call also makes opening the UI self-healing; the backend ignores
         // repeated same-AppID updates without reapplying the shader.
         await serverAPI.callPluginMethod("set_current_game_info", {
@@ -315,32 +315,123 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 };
 
 export default definePlugin((serverApi: ServerAPI) => {
-    let lastAppId = `${Router.MainRunningApp?.appid || "Unknown"}`;
+    const getRouterGameInfo = () => ({
+        appid: `${Router.MainRunningApp?.appid || "Unknown"}`,
+        appname: `${Router.MainRunningApp?.display_name || "Unknown"}`
+    });
 
-    const syncCurrentGameInfo = async () => {
-        const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
-        const appname = `${Router.MainRunningApp?.display_name || "Unknown"}`;
+    let activeAppId = getRouterGameInfo().appid;
+    let lastPolledAppId = activeAppId;
+    let consecutiveUnknownPolls = 0;
+    let trustEventUntil = 0;
+
+    const syncGameInfo = async (appid: string, appname: string) => {
+        activeAppId = appid;
         await serverApi.callPluginMethod("set_current_game_info", {
             appid,
             appname
         });
+        if (forceRefreshContent) forceRefreshContent();
+    };
+
+    const syncFromRouter = async () => {
+        const info = getRouterGameInfo();
+        lastPolledAppId = info.appid;
+        consecutiveUnknownPolls = 0;
+        await syncGameInfo(info.appid, info.appname);
+    };
+
+    const normalizeAppId = (value: any): string | null => {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric) || numeric === 0) return null;
+        return `${numeric >>> 0}`;
+    };
+
+    const syncStartedApp = (appid: string) => {
+        const routerInfo = getRouterGameInfo();
+        const appname = routerInfo.appid === appid ? routerInfo.appname : "Unknown";
+        lastPolledAppId = appid;
+        consecutiveUnknownPolls = 0;
+        trustEventUntil = Date.now() + 7500;
+        void syncGameInfo(appid, appname).catch(error => console.error(error));
     };
 
     // Initialize backend state even if the Reshadeck panel is never opened.
-    void syncCurrentGameInfo().catch(error => console.error(error));
+    void syncFromRouter().catch(error => console.error(error));
 
+    const steamClient = (globalThis as any).SteamClient;
+
+    // Actual app lifetime events are authoritative for process start/stop and do
+    // not depend on the QAM/Reshadeck panel being mounted.
+    const lifetimeRegistration = steamClient?.GameSessions?.RegisterForAppLifetimeNotifications?.(
+        (notification: any) => {
+            const eventAppId = normalizeAppId(notification?.unAppID);
+
+            if (notification?.bRunning === true) {
+                if (eventAppId) {
+                    syncStartedApp(eventAppId);
+                } else {
+                    // Some Steam builds report 0 for non-Steam shortcuts. Give the
+                    // running-app store a moment to catch up and reconcile from it.
+                    setTimeout(() => {
+                        void syncFromRouter().catch(error => console.error(error));
+                    }, 500);
+                }
+                return;
+            }
+
+            if (notification?.bRunning === false && (!eventAppId || eventAppId === activeAppId)) {
+                const routerInfo = getRouterGameInfo();
+                const nextInfo = routerInfo.appid !== eventAppId
+                    ? routerInfo
+                    : { appid: "Unknown", appname: "Unknown" };
+                lastPolledAppId = nextInfo.appid;
+                consecutiveUnknownPolls = 0;
+                trustEventUntil = 0;
+                void syncGameInfo(nextInfo.appid, nextInfo.appname)
+                    .catch(error => console.error(error));
+            }
+        }
+    );
+
+    // Launch events provide the AppID even on Steam builds where lifetime
+    // notifications report 0 for a non-Steam shortcut. A later lifetime event
+    // for the same AppID is harmless because the backend ignores same-AppID syncs.
+    const gameActionRegistration = steamClient?.Apps?.RegisterForGameActionStart?.(
+        (_gameActionId: number, appId: string, action: string) => {
+            if (action !== "LaunchApp") return;
+            const startedAppId = normalizeAppId(appId);
+            if (startedAppId) syncStartedApp(startedAppId);
+        }
+    );
+
+    // Keep the original 5-second polling as reconciliation/fallback, but do not
+    // let a transient stale Home/Unknown snapshot immediately undo a real app
+    // start event. Two consecutive Unknown polls are required as the last-resort
+    // stop detector if Steam's lifetime notification was missed.
     const interval = setInterval(() => {
-        const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
+        const info = getRouterGameInfo();
 
-        if (appid !== lastAppId) {
-            lastAppId = appid;
+        if (info.appid === activeAppId) {
+            lastPolledAppId = info.appid;
+            consecutiveUnknownPolls = 0;
+            return;
+        }
 
-            // Game-specific shader state must be applied independently of whether
-            // the Reshadeck UI has ever been opened.
-            void syncCurrentGameInfo()
-                .then(() => {
-                    if (forceRefreshContent) forceRefreshContent();
-                })
+        if (Date.now() < trustEventUntil) {
+            return;
+        }
+
+        if (info.appid === "Unknown" && activeAppId !== "Unknown") {
+            consecutiveUnknownPolls += 1;
+            if (consecutiveUnknownPolls < 2) return;
+        } else {
+            consecutiveUnknownPolls = 0;
+        }
+
+        if (info.appid !== lastPolledAppId || info.appid !== activeAppId) {
+            lastPolledAppId = info.appid;
+            void syncGameInfo(info.appid, info.appname)
                 .catch(error => console.error(error));
         }
     }, 5000);
@@ -351,6 +442,8 @@ export default definePlugin((serverApi: ServerAPI) => {
         icon: <MdWbShade />,
         onDismount() {
             clearInterval(interval);
+            lifetimeRegistration?.unregister?.();
+            gameActionRegistration?.unregister?.();
         },
         alwaysRender: true
     };
