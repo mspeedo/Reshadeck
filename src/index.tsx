@@ -58,7 +58,17 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
     const [applyDisabled, setApplyDisabled] = useState(false);
 
     const [refreshVersion, setRefreshVersion] = useState(0);
-    forceRefreshContent = () => setRefreshVersion(v => v + 1);
+
+    const clearParameterTimeouts = () => {
+        Object.values(parameterTimeouts.current).forEach(timeout => clearTimeout(timeout));
+        parameterTimeouts.current = {};
+    };
+
+    // App changes invalidate pending slider callbacks before backend state changes.
+    forceRefreshContent = () => {
+        clearParameterTimeouts();
+        setRefreshVersion(v => v + 1);
+    };
 
     const getShaderOptions = (le_list: string[], baseShaderOrSS: any) => {
         let options: DropdownOption[] = [];
@@ -102,6 +112,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
     };
 
     const initState = async () => {
+        // This is the single frontend path that updates backend game state.
         await refreshCurrentGameInfo();
 
         let shaderList = (await serverAPI.callPluginMethod("get_shader_list", {})).result as string[];
@@ -114,7 +125,10 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 
         let curr = await serverAPI.callPluginMethod("get_current_shader", {});
         const currentShader = String(curr.result || "None");
-        setSelectedShader({ data: currentShader, label: (currentShader === "0" ? "None" : currentShader) } as SingleDropdownOption);
+        setSelectedShader({
+            data: currentShader,
+            label: (currentShader === "0" ? "None" : currentShader)
+        } as SingleDropdownOption);
         await loadShaderParameters(currentShader);
 
         let eff = await serverAPI.callPluginMethod("get_current_effect", {});
@@ -127,7 +141,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 
     useEffect(() => {
         return () => {
-            Object.values(parameterTimeouts.current).forEach(timeout => clearTimeout(timeout));
+            clearParameterTimeouts();
         };
     }, []);
 
@@ -177,8 +191,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                     rgOptions={shaderOptions}
                     selectedOption={selectedShader}
                     onChange={async (newSelectedShader: DropdownOption) => {
-                        Object.values(parameterTimeouts.current).forEach(timeout => clearTimeout(timeout));
-                        parameterTimeouts.current = {};
+                        clearParameterTimeouts();
                         setSelectedShader(newSelectedShader);
                         const shaderName = String(newSelectedShader.data);
                         await serverAPI.callPluginMethod("set_shader", { shader_name: shaderName });
@@ -231,21 +244,26 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                                     item.name === parameter.name ? { ...item, value: realValue } : item
                                 ));
 
-                                const timeoutKey = `${String(selectedShader.data)}:${parameter.name}`;
+                                const shaderName = String(selectedShader.data);
+                                const appIdAtChange = currentGameId;
+                                const timeoutKey = `${appIdAtChange}:${shaderName}:${parameter.name}`;
                                 if (parameterTimeouts.current[timeoutKey]) {
                                     clearTimeout(parameterTimeouts.current[timeoutKey]);
                                 }
                                 parameterTimeouts.current[timeoutKey] = window.setTimeout(async () => {
                                     try {
                                         await serverAPI.callPluginMethod("set_shader_parameter", {
-                                            shader_name: String(selectedShader.data),
+                                            shader_name: shaderName,
                                             parameter_name: parameter.name,
-                                            value: realValue
+                                            value: realValue,
+                                            appid: appIdAtChange
                                         });
                                         const eff = await serverAPI.callPluginMethod("get_current_effect", {});
                                         setCurrentEffect((eff.result as { effect: string }).effect || "");
                                     } catch (error) {
                                         console.error(error);
+                                    } finally {
+                                        delete parameterTimeouts.current[timeoutKey];
                                     }
                                 }, 500);
                             }}
@@ -266,25 +284,17 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 
 export default definePlugin((serverApi: ServerAPI) => {
     let logic = new ReshadeckLogic(serverApi);
-//  let suspend_registers = [
-//      window.SteamClient.System.RegisterForOnSuspendRequest(logic.handleSuspend),
-//      window.SteamClient.System.RegisterForOnResumeFromSuspend(logic.handleResume),
-//  ];
 
     let lastAppId = `${Router.MainRunningApp?.appid || "Unknown"}`;
-    const interval = setInterval(async () => {
+    const interval = setInterval(() => {
         const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
-        const appname = `${Router.MainRunningApp?.display_name || "Unknown"}`;
 
         if (appid !== lastAppId) {
             lastAppId = appid;
-            await serverApi.callPluginMethod("set_current_game_info", {
-                appid,
-                appname,
-            });
+            // initState() performs the one and only set_current_game_info RPC.
             if (forceRefreshContent) forceRefreshContent();
         }
-    }, 5000);
+    }, 1000);
 
     return {
         title: <div className={staticClasses.Title}>Reshadeck</div>,
