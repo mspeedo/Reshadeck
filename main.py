@@ -166,6 +166,9 @@ class Plugin:
                 parameter["value"] = stored[parameter["name"]]
         return parameters
 
+    async def has_shader_parameter_overrides(self, shader_name: str):
+        return bool(Plugin._validated_stored_parameters(str(shader_name)))
+
     @staticmethod
     def _patch_shader_bytes(shader_name: str, values: dict) -> bytes | None:
         fx_file = Plugin._shader_path(shader_name)
