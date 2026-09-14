@@ -481,6 +481,21 @@ class Plugin:
             )
         return True
 
+    async def reset_shader_parameters(self, shader_name: str):
+        shader_name = str(shader_name)
+        if not Plugin._parse_shader_parameters(shader_name):
+            return False
+
+        Plugin._shader_parameters.pop(shader_name, None)
+        Plugin.save_config()
+
+        if Plugin._enabled and Plugin._current == shader_name:
+            return await Plugin._apply_shader_effect(
+                shader_name,
+                force_reload=True,
+            )
+        return True
+
     async def apply_shader(self, force: str = "true"):
         if not Plugin._enabled:
             return False
