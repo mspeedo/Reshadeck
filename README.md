@@ -19,7 +19,7 @@ The plugin ships with a small curated shader set. Additional `.fx` shaders can b
 - Reset a shader's saved parameters to the defaults defined in the original `.fx` file.
 - Force a fresh shader compilation with **Reload Shader**, even when the parameter values have not changed.
 - Keep original shader files unchanged. Per-game parameter values are applied to temporary shader copies.
-- Check the currently running Steam app every 5 seconds and load the saved shader state when its AppID changes.
+- Synchronize the currently running Steam app when the plugin frontend starts, then check it every 5 seconds and load the saved shader state when its AppID changes.
 
 ## Shader parameters
 
@@ -52,9 +52,9 @@ Selecting a shader applies it automatically when shaders are enabled. Parameter 
 
 **Reload Shader** is therefore primarily a manual force-reload control. It creates a fresh temporary shader filename so Gamescope recompiles the effect even when no parameter changed. The button is disabled when shaders are disabled or no shader is selected.
 
-Reshadeck checks `Router.MainRunningApp` every 5 seconds. When the AppID differs from the previously observed AppID, the poller calls the backend directly with the new AppID and app name. The backend then loads that app's saved configuration and applies or disables the shader state as required. This polling path does not depend on the Reshadeck panel being open.
+The polling controller reads `Router.MainRunningApp`, performs one immediate synchronization when the plugin frontend starts, and then checks again every 5 seconds. When the AppID differs from the last successfully synchronized AppID, it calls the backend directly with the new AppID and app name. The backend then loads that app's saved configuration and applies or disables the shader state as required. This path does not depend on the Reshadeck panel being open.
 
-Opening the Reshadeck UI also reads the current app and refreshes the displayed shader state, matching the behavior of the original polling implementation.
+Opening or refreshing the Reshadeck UI does not update backend app state. The panel only reads the current Router app for display and reads the already synchronized shader state from the backend. App switching therefore has a single control path: the polling controller.
 
 ## Custom shaders
 
