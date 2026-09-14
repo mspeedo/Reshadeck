@@ -597,55 +597,6 @@ class Plugin:
             logger.error(f"Failed to get current effect: {e}")
             return "None"
 
-    async def reconcile_shader_state(self):
-        expected_appid = Plugin._appid
-        actual_effect = await Plugin._get_current_effect_name()
-
-        if not Plugin._enabled or Plugin._current == "None":
-            if actual_effect == "None":
-                return {"changed": False, "effect": actual_effect}
-
-            logger.info(
-                f"Reconciling shader state for AppID={expected_appid}: "
-                f"expected no effect, found {actual_effect}"
-            )
-            changed = await Plugin._apply_shader_effect(
-                "None",
-                expected_appid=expected_appid,
-            )
-            return {
-                "changed": changed,
-                "effect": await Plugin._get_current_effect_name(),
-            }
-
-        values = Plugin._validated_stored_parameters(Plugin._current)
-        expected_bytes = Plugin._patch_shader_bytes(Plugin._current, values)
-        matches = False
-
-        if actual_effect != "None" and expected_bytes is not None and Path(actual_effect).name == actual_effect:
-            actual_path = Path(destination_folder) / actual_effect
-            try:
-                matches = actual_path.is_file() and actual_path.read_bytes() == expected_bytes
-            except OSError as e:
-                logger.warning(f"Failed to inspect active shader {actual_effect}: {e}")
-
-        if matches:
-            return {"changed": False, "effect": actual_effect}
-
-        logger.info(
-            f"Reconciling shader state for AppID={expected_appid}: "
-            f"expected {Plugin._current} with saved parameters, found {actual_effect}"
-        )
-        changed = await Plugin._apply_shader_effect(
-            Plugin._current,
-            force_reload=False,
-            expected_appid=expected_appid,
-        )
-        return {
-            "changed": changed,
-            "effect": await Plugin._get_current_effect_name(),
-        }
-
     async def get_current_effect(self):
         return {"effect": await Plugin._get_current_effect_name()}
 
