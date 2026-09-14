@@ -183,8 +183,6 @@ class Plugin:
         Plugin.save_config()
 
         if Plugin._enabled and Plugin._current == shader_name:
-            # Content-based reload: changed values produce a different effect name,
-            # while sending the same value again avoids a redundant recompile.
             await Plugin._run_shader_script(shader_name, "false")
         return True
 
@@ -237,11 +235,25 @@ class Plugin:
     @staticmethod
     def _get_all_shaders():
         legacy_cas_temp = re.compile(r"^CAS_[0-9]{4}[A-Za-z0-9]{4}\.fx$")
-        generic_temp = re.compile(r"^RESHADCK_.+_[0-9a-f]{10}(?:_[A-Za-z0-9]{4})?\.fx$")
+        previous_generic_temp = re.compile(r"^RESHADCK_.+_[0-9a-f]{10}(?:_[A-Za-z0-9]{4})?\.fx$")
+        previous_hash_temp = re.compile(r"^.+_[0-9a-f]{10}[A-Za-z0-9]{4}\.fx$")
+        current_temp = re.compile(r"^(.+)_([A-Za-z0-9]{4})\.fx$")
+
+        shader_dir = Path(destination_folder)
+
+        def is_temp(name: str) -> bool:
+            if legacy_cas_temp.match(name) or previous_generic_temp.match(name) or previous_hash_temp.match(name):
+                return True
+            match = current_temp.match(name)
+            if not match:
+                return False
+            original_name = match.group(1) + ".fx"
+            return (shader_dir / original_name).is_file()
+
         return sorted(
             str(p.name)
-            for p in Path(destination_folder).glob("*.fx")
-            if not legacy_cas_temp.match(p.name) and not generic_temp.match(p.name)
+            for p in shader_dir.glob("*.fx")
+            if not is_temp(p.name)
         )
 
     async def get_shader_list(self):
