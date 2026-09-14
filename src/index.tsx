@@ -96,9 +96,8 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         setCurrentGameId(appid);
         setCurrentGameName(appname);
 
-        // Background lifecycle hooks normally keep backend game state current.
-        // This call also makes opening the UI self-healing; the backend ignores
-        // repeated same-AppID updates without reapplying the shader.
+        // Lifecycle hooks normally keep backend game state current. This one-shot
+        // sync also makes opening the UI self-healing after a plugin reload.
         await serverAPI.callPluginMethod("set_current_game_info", {
             appid,
             appname
@@ -321,9 +320,6 @@ export default definePlugin((serverApi: ServerAPI) => {
     });
 
     let activeAppId = getRouterGameInfo().appid;
-    let lastPolledAppId = activeAppId;
-    let consecutiveUnknownPolls = 0;
-    let trustEventUntil = 0;
 
     const syncGameInfo = async (appid: string, appname: string) => {
         activeAppId = appid;
@@ -336,8 +332,6 @@ export default definePlugin((serverApi: ServerAPI) => {
 
     const syncFromRouter = async () => {
         const info = getRouterGameInfo();
-        lastPolledAppId = info.appid;
-        consecutiveUnknownPolls = 0;
         await syncGameInfo(info.appid, info.appname);
     };
 
@@ -350,19 +344,17 @@ export default definePlugin((serverApi: ServerAPI) => {
     const syncStartedApp = (appid: string) => {
         const routerInfo = getRouterGameInfo();
         const appname = routerInfo.appid === appid ? routerInfo.appname : "Unknown";
-        lastPolledAppId = appid;
-        consecutiveUnknownPolls = 0;
-        trustEventUntil = Date.now() + 7500;
         void syncGameInfo(appid, appname).catch(error => console.error(error));
     };
 
-    // Initialize backend state even if the Reshadeck panel is never opened.
+    // One-shot startup reconciliation for plugin reloads while an app is already
+    // running. Normal transitions are event-driven below.
     void syncFromRouter().catch(error => console.error(error));
 
     const steamClient = (globalThis as any).SteamClient;
 
-    // Actual app lifetime events are authoritative for process start/stop and do
-    // not depend on the QAM/Reshadeck panel being mounted.
+    // App lifetime events are authoritative for normal start/stop transitions and
+    // do not depend on the QAM/Reshadeck panel being mounted.
     const lifetimeRegistration = steamClient?.GameSessions?.RegisterForAppLifetimeNotifications?.(
         (notification: any) => {
             const eventAppId = normalizeAppId(notification?.unAppID);
@@ -370,27 +362,41 @@ export default definePlugin((serverApi: ServerAPI) => {
             if (notification?.bRunning === true) {
                 if (eventAppId) {
                     syncStartedApp(eventAppId);
-                } else {
-                    // Some Steam builds report 0 for non-Steam shortcuts. Give the
-                    // running-app store a moment to catch up and reconcile from it.
-                    setTimeout(() => {
-                        void syncFromRouter().catch(error => console.error(error));
-                    }, 500);
+                }
+                // Some Steam builds report 0 for non-Steam shortcuts. In that case
+                // RegisterForGameActionStart below provides the actual AppID.
+                return;
+            }
+
+            if (notification?.bRunning !== false) return;
+
+            if (eventAppId) {
+                // Ignore a late stop for the previous app if a new app has already
+                // started. Otherwise disable the old app's effect immediately.
+                if (eventAppId === activeAppId) {
+                    void syncGameInfo("Unknown", "Unknown")
+                        .catch(error => console.error(error));
                 }
                 return;
             }
 
-            if (notification?.bRunning === false && (!eventAppId || eventAppId === activeAppId)) {
+            // Zero-AppID stop notifications cannot identify the app. Delay briefly
+            // so a concurrent start event can win. If no new app starts, clear the
+            // current app. A one-shot Router read is used only to recognize a new
+            // app that is already visible; this is not a polling control path.
+            const stoppedActiveAppId = activeAppId;
+            setTimeout(() => {
+                if (activeAppId !== stoppedActiveAppId) return;
+
                 const routerInfo = getRouterGameInfo();
-                const nextInfo = routerInfo.appid !== eventAppId
-                    ? routerInfo
-                    : { appid: "Unknown", appname: "Unknown" };
-                lastPolledAppId = nextInfo.appid;
-                consecutiveUnknownPolls = 0;
-                trustEventUntil = 0;
-                void syncGameInfo(nextInfo.appid, nextInfo.appname)
-                    .catch(error => console.error(error));
-            }
+                if (routerInfo.appid !== "Unknown" && routerInfo.appid !== stoppedActiveAppId) {
+                    void syncGameInfo(routerInfo.appid, routerInfo.appname)
+                        .catch(error => console.error(error));
+                } else {
+                    void syncGameInfo("Unknown", "Unknown")
+                        .catch(error => console.error(error));
+                }
+            }, 250);
         }
     );
 
@@ -405,43 +411,11 @@ export default definePlugin((serverApi: ServerAPI) => {
         }
     );
 
-    // Keep the original 5-second polling as reconciliation/fallback, but do not
-    // let a transient stale Home/Unknown snapshot immediately undo a real app
-    // start event. Two consecutive Unknown polls are required as the last-resort
-    // stop detector if Steam's lifetime notification was missed.
-    const interval = setInterval(() => {
-        const info = getRouterGameInfo();
-
-        if (info.appid === activeAppId) {
-            lastPolledAppId = info.appid;
-            consecutiveUnknownPolls = 0;
-            return;
-        }
-
-        if (Date.now() < trustEventUntil) {
-            return;
-        }
-
-        if (info.appid === "Unknown" && activeAppId !== "Unknown") {
-            consecutiveUnknownPolls += 1;
-            if (consecutiveUnknownPolls < 2) return;
-        } else {
-            consecutiveUnknownPolls = 0;
-        }
-
-        if (info.appid !== lastPolledAppId || info.appid !== activeAppId) {
-            lastPolledAppId = info.appid;
-            void syncGameInfo(info.appid, info.appname)
-                .catch(error => console.error(error));
-        }
-    }, 5000);
-
     return {
         title: <div className={staticClasses.Title}>Reshadeck</div>,
         content: <Content serverAPI={serverApi} />,
         icon: <MdWbShade />,
         onDismount() {
-            clearInterval(interval);
             lifetimeRegistration?.unregister?.();
             gameActionRegistration?.unregister?.();
         },
