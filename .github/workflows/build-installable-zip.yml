@@ -1,0 +1,118 @@
+name: Build installable Reshadeck ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - generic-shader-parameters
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Reshadeck plugin
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          # The repository contains two legacy local pnpm link entries used only
+          # during development. They are not imported by the plugin and do not
+          # exist on a clean CI runner, so temporarily omit them for installation.
+          cp package.json package.json.release
+          node <<'NODE'
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          for (const [name, specifier] of Object.entries(pkg.dependencies || {})) {
+            if (String(specifier).startsWith('link:')) {
+              delete pkg.dependencies[name];
+            }
+          }
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+
+          pnpm install --no-frozen-lockfile
+
+          # Restore the release metadata exactly as committed. Decky does not run
+          # npm/pnpm during plugin installation.
+          mv package.json.release package.json
+          git checkout -- pnpm-lock.yaml
+
+      - name: Build frontend
+        run: pnpm run build
+
+      - name: Create Decky install ZIP
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(node -p "require('./package.json').version")"
+          PACKAGE_DIR="build/reshadeck"
+          ZIP_PATH="build/reshadeck_v${VERSION}.zip"
+
+          rm -rf build
+          mkdir -p "${PACKAGE_DIR}"
+
+          cp main.py plugin.json package.json LICENSE README.md "${PACKAGE_DIR}/"
+          cp -a dist "${PACKAGE_DIR}/dist"
+
+          # The repository's top-level 'shaders' entry is a symlink. Package the
+          # real files so Decky's ZIP installer does not depend on symlink support.
+          cp -a defaults/shaders "${PACKAGE_DIR}/shaders"
+          chmod 755 "${PACKAGE_DIR}/shaders/set_shader.sh"
+
+          (
+            cd build
+            zip -r -9 "reshadeck_v${VERSION}.zip" reshadeck
+          )
+
+          echo "zip=${ZIP_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "filename=reshadeck_v${VERSION}.zip" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate install package
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_PATH="${{ steps.package.outputs.zip }}"
+
+          test -s "${ZIP_PATH}"
+          zipinfo -1 "${ZIP_PATH}" | grep -qx 'reshadeck/main.py'
+          zipinfo -1 "${ZIP_PATH}" | grep -qx 'reshadeck/plugin.json'
+          zipinfo -1 "${ZIP_PATH}" | grep -qx 'reshadeck/package.json'
+          zipinfo -1 "${ZIP_PATH}" | grep -qx 'reshadeck/dist/index.js'
+          zipinfo -1 "${ZIP_PATH}" | grep -qx 'reshadeck/shaders/set_shader.sh'
+
+          TOP_LEVEL="$(zipinfo -1 "${ZIP_PATH}" | sed '/^$/d' | cut -d/ -f1 | sort -u)"
+          test "${TOP_LEVEL}" = 'reshadeck'
+
+          echo "Validated ${ZIP_PATH}:"
+          unzip -l "${ZIP_PATH}"
+
+      - name: Upload directly installable ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.filename }}
+          path: ${{ steps.package.outputs.zip }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
