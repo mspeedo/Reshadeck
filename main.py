@@ -183,7 +183,9 @@ class Plugin:
         Plugin.save_config()
 
         if Plugin._enabled and Plugin._current == shader_name:
-            await Plugin._run_shader_script(shader_name, "true")
+            # Content-based reload: changed values produce a different effect name,
+            # while sending the same value again avoids a redundant recompile.
+            await Plugin._run_shader_script(shader_name, "false")
         return True
 
     @staticmethod
@@ -234,11 +236,12 @@ class Plugin:
 
     @staticmethod
     def _get_all_shaders():
-        temp_pattern = re.compile(r"^CAS_[0-9]{4}[A-Za-z0-9]{4}\.fx$")
+        legacy_cas_temp = re.compile(r"^CAS_[0-9]{4}[A-Za-z0-9]{4}\.fx$")
+        generic_temp = re.compile(r"^RESHADCK_.+_[0-9a-f]{10}(?:_[A-Za-z0-9]{4})?\.fx$")
         return sorted(
             str(p.name)
             for p in Path(destination_folder).glob("*.fx")
-            if not temp_pattern.match(p.name)
+            if not legacy_cas_temp.match(p.name) and not generic_temp.match(p.name)
         )
 
     async def get_shader_list(self):
