@@ -449,15 +449,7 @@ class Plugin:
         shader_name: str,
         parameter_name: str,
         value: float,
-        appid: str | None = None,
     ):
-        if appid is not None and str(appid) != Plugin._appid:
-            logger.warning(
-                f"Ignoring stale parameter update for AppID={appid}; "
-                f"current AppID={Plugin._appid}"
-            )
-            return False
-
         definitions = {p["name"]: p for p in Plugin._parse_shader_parameters(shader_name)}
         definition = definitions.get(parameter_name)
         if definition is None:
@@ -486,7 +478,6 @@ class Plugin:
             return await Plugin._apply_shader_effect(
                 shader_name,
                 force_reload=True,
-                expected_appid=Plugin._appid,
             )
         return True
 
