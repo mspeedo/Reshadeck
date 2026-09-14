@@ -177,6 +177,8 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                     rgOptions={shaderOptions}
                     selectedOption={selectedShader}
                     onChange={async (newSelectedShader: DropdownOption) => {
+                        Object.values(parameterTimeouts.current).forEach(timeout => clearTimeout(timeout));
+                        parameterTimeouts.current = {};
                         setSelectedShader(newSelectedShader);
                         const shaderName = String(newSelectedShader.data);
                         await serverAPI.callPluginMethod("set_shader", { shader_name: shaderName });
@@ -233,13 +235,19 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                                 if (parameterTimeouts.current[timeoutKey]) {
                                     clearTimeout(parameterTimeouts.current[timeoutKey]);
                                 }
-                                parameterTimeouts.current[timeoutKey] = window.setTimeout(() => {
-                                    serverAPI.callPluginMethod("set_shader_parameter", {
-                                        shader_name: String(selectedShader.data),
-                                        parameter_name: parameter.name,
-                                        value: realValue
-                                    }).catch(console.error);
-                                }, 350);
+                                parameterTimeouts.current[timeoutKey] = window.setTimeout(async () => {
+                                    try {
+                                        await serverAPI.callPluginMethod("set_shader_parameter", {
+                                            shader_name: String(selectedShader.data),
+                                            parameter_name: parameter.name,
+                                            value: realValue
+                                        });
+                                        const eff = await serverAPI.callPluginMethod("get_current_effect", {});
+                                        setCurrentEffect((eff.result as { effect: string }).effect || "");
+                                    } catch (error) {
+                                        console.error(error);
+                                    }
+                                }, 150);
                             }}
                         />
                     </PanelSectionRow>
