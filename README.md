@@ -19,6 +19,8 @@ The plugin ships with a small curated shader set. Additional `.fx` shaders can b
 - Reset a shader's saved parameters to the defaults defined in the original `.fx` file.
 - Force a fresh shader compilation with **Reload Shader**, even when the parameter values have not changed.
 - Keep original shader files unchanged. Per-game parameter values are applied to temporary shader copies.
+- Switch per-game shader state from Steam app lifetime/launch events without periodic polling.
+- Reconcile the saved shader state against the actual active Gamescope effect whenever the Reshadeck UI is opened.
 
 ## Shader parameters
 
@@ -51,7 +53,9 @@ Selecting a shader applies it automatically when shaders are enabled. Parameter 
 
 **Reload Shader** is therefore primarily a manual force-reload control. It creates a fresh temporary shader filename so Gamescope recompiles the effect even when no parameter changed. The button is disabled when shaders are disabled or no shader is selected.
 
-When the running app changes, Reshadeck loads the saved state for the new AppID. The plugin checks for app changes every 5 seconds.
+When the running app changes, Reshadeck reacts to Steam app lifetime and launch events and loads the saved state for the new AppID. There is no periodic running-app poller.
+
+Opening the Reshadeck UI performs a one-shot recovery check. It syncs the currently visible AppID, compares the saved shader plus parameter values with the actual file referenced by `GAMESCOPE_RESHADE_EFFECT`, and only reapplies or disables the effect when the two states differ. This also recovers from a missed app-change event or a failed shader application without adding continuous background polling.
 
 ## Custom shaders
 
