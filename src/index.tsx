@@ -56,6 +56,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
     const [shaderParameters, setShaderParameters] = useState<ShaderParameter[]>([]);
     const parameterTimeouts = useRef<Record<string, number>>({});
     const [applyDisabled, setApplyDisabled] = useState(false);
+    const [resetDisabled, setResetDisabled] = useState(false);
 
     const [refreshVersion, setRefreshVersion] = useState(0);
 
@@ -265,6 +266,31 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                     </PanelSectionRow>
                 );
             })}
+
+            {shaderParameters.length > 0 && (
+                <PanelSectionRow>
+                    <ButtonItem
+                        disabled={resetDisabled}
+                        onClick={async () => {
+                            clearParameterTimeouts();
+                            setResetDisabled(true);
+                            const shaderName = String(selectedShader.data);
+                            try {
+                                await serverAPI.callPluginMethod("reset_shader_parameters", {
+                                    shader_name: shaderName
+                                });
+                                await loadShaderParameters(shaderName);
+                                const eff = await serverAPI.callPluginMethod("get_current_effect", {});
+                                setCurrentEffect((eff.result as { effect: string }).effect || "");
+                            } catch (error) {
+                                console.error(error);
+                            } finally {
+                                setResetDisabled(false);
+                            }
+                        }}
+                    >Reset Defaults</ButtonItem>
+                </PanelSectionRow>
+            )}
 
             <PanelSectionRow>
                 <div>Place any custom shaders in <pre>~/.local/share/gamescope</pre><pre>/reshade/Shaders</pre> so that the .fx files are in the root of the Shaders folder.</div>
