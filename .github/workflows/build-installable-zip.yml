@@ -32,6 +32,12 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      - name: Validate backend and shell syntax
+        shell: bash
+        run: |
+          python3 -m py_compile main.py
+          bash -n defaults/shaders/set_shader.sh
+
       - name: Install build dependencies
         shell: bash
         run: |
