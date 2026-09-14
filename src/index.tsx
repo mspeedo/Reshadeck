@@ -96,6 +96,9 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         setCurrentGameId(appid);
         setCurrentGameName(appname);
 
+        // The background poller normally keeps backend game state current.
+        // This call also makes opening the UI self-healing; the backend ignores
+        // repeated same-AppID updates without reapplying the shader.
         await serverAPI.callPluginMethod("set_current_game_info", {
             appid,
             appname
@@ -103,7 +106,6 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
     };
 
     const initState = async () => {
-        // This is the single frontend path that updates backend game state.
         await refreshCurrentGameInfo();
 
         const shaderList = (await serverAPI.callPluginMethod("get_shader_list", {})).result as string[];
@@ -314,13 +316,32 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 
 export default definePlugin((serverApi: ServerAPI) => {
     let lastAppId = `${Router.MainRunningApp?.appid || "Unknown"}`;
+
+    const syncCurrentGameInfo = async () => {
+        const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
+        const appname = `${Router.MainRunningApp?.display_name || "Unknown"}`;
+        await serverApi.callPluginMethod("set_current_game_info", {
+            appid,
+            appname
+        });
+    };
+
+    // Initialize backend state even if the Reshadeck panel is never opened.
+    void syncCurrentGameInfo().catch(error => console.error(error));
+
     const interval = setInterval(() => {
         const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
 
         if (appid !== lastAppId) {
             lastAppId = appid;
-            // initState() performs the one and only set_current_game_info RPC.
-            if (forceRefreshContent) forceRefreshContent();
+
+            // Game-specific shader state must be applied independently of whether
+            // the Reshadeck UI has ever been opened.
+            void syncCurrentGameInfo()
+                .then(() => {
+                    if (forceRefreshContent) forceRefreshContent();
+                })
+                .catch(error => console.error(error));
         }
     }, 5000);
 
