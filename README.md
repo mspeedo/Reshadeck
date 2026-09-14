@@ -19,8 +19,7 @@ The plugin ships with a small curated shader set. Additional `.fx` shaders can b
 - Reset a shader's saved parameters to the defaults defined in the original `.fx` file.
 - Force a fresh shader compilation with **Reload Shader**, even when the parameter values have not changed.
 - Keep original shader files unchanged. Per-game parameter values are applied to temporary shader copies.
-- Switch per-game shader state from Steam app lifetime/launch events without periodic polling.
-- Reconcile the saved shader state against the actual active Gamescope effect whenever the Reshadeck UI is opened.
+- Check the currently running Steam app every 5 seconds and load the saved shader state when its AppID changes.
 
 ## Shader parameters
 
@@ -53,9 +52,9 @@ Selecting a shader applies it automatically when shaders are enabled. Parameter 
 
 **Reload Shader** is therefore primarily a manual force-reload control. It creates a fresh temporary shader filename so Gamescope recompiles the effect even when no parameter changed. The button is disabled when shaders are disabled or no shader is selected.
 
-When the running app changes, Reshadeck reacts to Steam app lifetime and launch events and loads the saved state for the new AppID. There is no periodic running-app poller.
+Reshadeck checks `Router.MainRunningApp` every 5 seconds. When the AppID differs from the previously observed AppID, the poller calls the backend directly with the new AppID and app name. The backend then loads that app's saved configuration and applies or disables the shader state as required. This polling path does not depend on the Reshadeck panel being open.
 
-Opening the Reshadeck UI performs a one-shot recovery check. It syncs the currently visible AppID, compares the saved shader plus parameter values with the actual file referenced by `GAMESCOPE_RESHADE_EFFECT`, and only reapplies or disables the effect when the two states differ. This also recovers from a missed app-change event or a failed shader application without adding continuous background polling.
+Opening the Reshadeck UI also reads the current app and refreshes the displayed shader state, matching the behavior of the original polling implementation.
 
 ## Custom shaders
 
