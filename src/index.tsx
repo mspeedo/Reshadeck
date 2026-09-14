@@ -247,7 +247,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                                     } catch (error) {
                                         console.error(error);
                                     }
-                                }, 150);
+                                }, 500);
                             }}
                         />
                     </PanelSectionRow>
