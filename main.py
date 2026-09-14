@@ -13,90 +13,183 @@ destination_folder = decky_plugin.DECKY_USER_HOME + "/.local/share/gamescope/res
 shaders_folder = decky_plugin.DECKY_PLUGIN_DIR + "/shaders"
 config_file = decky_plugin.DECKY_PLUGIN_SETTINGS_DIR + "/config.json"
 
+
 class Plugin:
     _enabled = False
     _current = "None"
     _appid = "Unknown"
     _appname = "Unknown"
-    _contrast = 0.0
-    _sharpness = 1.0
-    _uniform_patterns = {
-        name: re.compile(
-            rf"(uniform\s+float\s+{name}\s*=[^0-9.\-+]*)([-+]?\d+\.\d{{6}})(\s*;)",
-            re.ASCII
+    _shader_parameters = {}
+
+    _uniform_pattern = re.compile(
+        r"^\s*uniform\s+float\s+([A-Za-z_]\w*)\s*"
+        r"(?:<(?P<annotations>.*?)>)?\s*=\s*"
+        r"(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*;",
+        re.MULTILINE | re.DOTALL,
+    )
+
+    @staticmethod
+    def _shader_path(shader_name: str) -> Path | None:
+        if not shader_name or shader_name == "None":
+            return None
+        if Path(shader_name).name != shader_name or shader_name not in Plugin._get_all_shaders():
+            logger.warning(f"Invalid shader name: {shader_name}")
+            return None
+        return Path(destination_folder) / shader_name
+
+    @staticmethod
+    def _annotation_number(annotations: str, name: str) -> float | None:
+        match = re.search(
+            rf"\b{name}\s*=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*;?",
+            annotations,
+            re.IGNORECASE,
         )
-        for name in ("Contrast","Sharpness")
-    }
-    
-    async def set_contrast(self, value: float):
-        Plugin._contrast = value
-
-    async def set_sharpness(self, value: float):
-        Plugin._sharpness = value
-        
-    async def update_cas_shader(self):
-        await Plugin._update_uniform_in_fx("Contrast", Plugin._contrast)
-        await Plugin._update_uniform_in_fx("Sharpness", Plugin._sharpness)
+        return float(match.group(1)) if match else None
 
     @staticmethod
-    async def _update_uniform_in_fx(uniform_name: str, value: float):
-        # logger.info(f"Updating {uniform_name} to {value}")
-        fx_file   = Path(destination_folder) / "CAS.fx"
-        if not fx_file.exists():
-            logger.error(f"Cannot patch—{fx_file} not found")
+    def _annotation_string(annotations: str, name: str) -> str | None:
+        match = re.search(rf'\b{name}\s*=\s*"([^"]*)"\s*;?', annotations, re.IGNORECASE)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _fallback_slider_range(value: float) -> tuple[float, float, float]:
+        # Keep the legacy CAS controls behaving as before while still giving
+        # unannotated scalar uniforms a useful generic range.
+        if 0.0 <= value <= 2.0:
+            return 0.0, 2.0, 0.1
+        if value >= 0.0:
+            maximum = max(1.0, value * 2.0)
+            return 0.0, maximum, max(0.01, maximum / 100.0)
+        extent = max(1.0, abs(value) * 2.0)
+        return -extent, extent, max(0.01, (extent * 2.0) / 100.0)
+
+    @staticmethod
+    def _parse_shader_parameters(shader_name: str) -> list[dict]:
+        fx_file = Plugin._shader_path(shader_name)
+        if fx_file is None or not fx_file.exists():
+            return []
+
+        try:
+            text = fx_file.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            logger.error(f"Failed to read shader parameters from {shader_name}: {e}")
+            return []
+
+        parameters = []
+        for match in Plugin._uniform_pattern.finditer(text):
+            name = match.group(1)
+            annotations = match.group("annotations") or ""
+
+            # ReShade runtime-provided uniforms (timer, frametime, etc.) are not
+            # user parameters even if a shader happens to give them an initializer.
+            if re.search(r"\bsource\s*=", annotations, re.IGNORECASE):
+                continue
+
+            value = float(match.group("value"))
+            minimum = Plugin._annotation_number(annotations, "ui_min")
+            maximum = Plugin._annotation_number(annotations, "ui_max")
+            step = Plugin._annotation_number(annotations, "ui_step")
+            label = Plugin._annotation_string(annotations, "ui_label") or name
+
+            fallback_min, fallback_max, fallback_step = Plugin._fallback_slider_range(value)
+            if minimum is None:
+                minimum = fallback_min
+            if maximum is None:
+                maximum = fallback_max
+            if maximum < minimum:
+                minimum, maximum = maximum, minimum
+            if step is None or step <= 0:
+                step = fallback_step
+
+            parameters.append({
+                "name": name,
+                "label": label,
+                "value": value,
+                "min": minimum,
+                "max": maximum,
+                "step": step,
+            })
+
+        return parameters
+
+    @staticmethod
+    def _stored_parameters_for(shader_name: str) -> dict:
+        stored = Plugin._shader_parameters.get(shader_name, {})
+        return stored if isinstance(stored, dict) else {}
+
+    async def get_shader_parameters(self, shader_name: str):
+        parameters = Plugin._parse_shader_parameters(shader_name)
+        stored = Plugin._stored_parameters_for(shader_name)
+        for parameter in parameters:
+            if parameter["name"] in stored:
+                parameter["value"] = float(stored[parameter["name"]])
+        return parameters
+
+    @staticmethod
+    def _write_shader_parameters(shader_name: str, values: dict):
+        if not values:
             return
-        pattern   = Plugin._uniform_patterns[uniform_name]
-        new_val   = f"{value:0>2.6f}".encode("ascii")
+
+        fx_file = Plugin._shader_path(shader_name)
+        if fx_file is None or not fx_file.exists():
+            return
+
         try:
-            with open(fx_file, "r+b") as f:
-                header = f.read(512)
-                # use the compiled pattern directly
-                match = pattern.search(header.decode("ascii"))
-                if not match:
-                    logger.warning(f"{uniform_name} not found in {fx_file.name}")
-                    return
-                start, end = match.start(2), match.end(2)
-                # seek back to absolute offset of the number
-                f.seek(start)
-                f.write(new_val)
-                f.flush()
-                logger.info(f"{uniform_name} → {new_val.decode()} in place")
+            text = fx_file.read_text(encoding="utf-8", errors="replace")
+            changed = False
+
+            for name, value in values.items():
+                pattern = re.compile(
+                    rf"(^\s*uniform\s+float\s+{re.escape(name)}\s*"
+                    rf"(?:<.*?>)?\s*=\s*)"
+                    rf"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+                    rf"(\s*;)",
+                    re.MULTILINE | re.DOTALL,
+                )
+                replacement_value = f"{float(value):.6f}"
+                text, count = pattern.subn(
+                    lambda m: m.group(1) + replacement_value + m.group(3),
+                    text,
+                    count=1,
+                )
+                if count:
+                    changed = True
+                else:
+                    logger.warning(f"Uniform {name} not found in {shader_name}")
+
+            if changed:
+                fx_file.write_text(text, encoding="utf-8")
         except Exception as e:
-            logger.error(f"Patch FX failed: {e}")
-            
-    async def get_contrast(self):
-        return Plugin._contrast
-        # return await asyncio.to_thread(Plugin._read_uniform_from_fx, "Contrast")
-    
-    async def get_sharpness(self):
-        return Plugin._sharpness
-        # return await asyncio.to_thread(Plugin._read_uniform_from_fx, "Sharpness")
+            logger.error(f"Failed to update shader parameters in {shader_name}: {e}")
 
     @staticmethod
-    def _read_uniform_from_fx(uniform_name: str) -> float | None:
-        fx_file = Path(destination_folder) / "CAS.fx"
-        if not fx_file.exists():
-            logger.error(f"Cannot read—{fx_file} not found")
-            return None
-        pattern = Plugin._uniform_patterns[uniform_name]
-        try:
-            with open(fx_file, "r", encoding="ascii") as f:
-                header = f.read(512)
-                match = pattern.search(header)
-                if match:
-                    value = float(match.group(2))
-                    logger.info(f"Read {uniform_name} = {value}")
-                    return value
-                else:
-                    logger.warning(f"{uniform_name} not found in {fx_file.name}")
-                    return None
-        except Exception as e:
-            logger.error(f"Failed to read {uniform_name}: {e}")
-            return None
+    def _apply_stored_parameters(shader_name: str):
+        Plugin._write_shader_parameters(shader_name, Plugin._stored_parameters_for(shader_name))
+
+    async def set_shader_parameter(self, shader_name: str, parameter_name: str, value: float):
+        definitions = {p["name"]: p for p in Plugin._parse_shader_parameters(shader_name)}
+        definition = definitions.get(parameter_name)
+        if definition is None:
+            logger.warning(f"Unknown shader parameter {parameter_name} for {shader_name}")
+            return False
+
+        numeric_value = float(value)
+        numeric_value = max(float(definition["min"]), min(float(definition["max"]), numeric_value))
+
+        if shader_name not in Plugin._shader_parameters or not isinstance(Plugin._shader_parameters[shader_name], dict):
+            Plugin._shader_parameters[shader_name] = {}
+        Plugin._shader_parameters[shader_name][parameter_name] = numeric_value
+        Plugin._write_shader_parameters(shader_name, {parameter_name: numeric_value})
+        Plugin.save_config()
+
+        if Plugin._enabled and Plugin._current == shader_name:
+            await Plugin._run_shader_script(shader_name, "true")
+        return True
 
     @staticmethod
     def load_config():
         try:
+            Plugin._shader_parameters = {}
             if not os.path.exists(config_file):
                 return
             with open(config_file, "r") as f:
@@ -104,8 +197,19 @@ class Plugin:
                 app_config = data.get(Plugin._appid, {})
                 Plugin._enabled = app_config.get("enabled", False)
                 Plugin._current = app_config.get("current", "None")
-                Plugin._contrast = app_config.get("contrast", 0.0)
-                Plugin._sharpness = app_config.get("sharpness", 1.0)
+                Plugin._shader_parameters = app_config.get("shader_parameters", {})
+                if not isinstance(Plugin._shader_parameters, dict):
+                    Plugin._shader_parameters = {}
+
+                # One-time compatibility with the previous CAS-only config format.
+                if "CAS.fx" not in Plugin._shader_parameters:
+                    legacy = {}
+                    if "contrast" in app_config:
+                        legacy["Contrast"] = float(app_config["contrast"])
+                    if "sharpness" in app_config:
+                        legacy["Sharpness"] = float(app_config["sharpness"])
+                    if legacy:
+                        Plugin._shader_parameters["CAS.fx"] = legacy
         except Exception as e:
             logger.error(f"Failed to read config: {e}")
 
@@ -121,15 +225,14 @@ class Plugin:
                 "appname": Plugin._appname,
                 "enabled": Plugin._enabled,
                 "current": Plugin._current,
-                "contrast": Plugin._contrast,
-                "sharpness": Plugin._sharpness
+                "shader_parameters": Plugin._shader_parameters,
             }
             with open(config_file, "w") as f:
                 json.dump(data, f, indent=4)
         except Exception as e:
             logger.error(f"Failed to write config: {e}")
-            
-    @staticmethod        
+
+    @staticmethod
     def _get_all_shaders():
         temp_pattern = re.compile(r"^CAS_[0-9]{4}[A-Za-z0-9]{4}\.fx$")
         return sorted(
@@ -139,75 +242,71 @@ class Plugin:
         )
 
     async def get_shader_list(self):
-        shaders = Plugin._get_all_shaders()
-        return shaders
+        return Plugin._get_all_shaders()
 
     async def get_shader_enabled(self):
-        return Plugin._enabled        
+        return Plugin._enabled
 
     async def get_current_shader(self):
         return Plugin._current
-        
+
     async def set_current_game_info(self, appid: str, appname: str):
         Plugin._appid = appid
         Plugin._appname = appname
         decky_plugin.logger.info(f"Current game info received: AppID={appid}, Name={appname}")
-        prevEnabled = Plugin._enabled
-        prevCurrent = Plugin._current
+        prev_enabled = Plugin._enabled
+        prev_current = Plugin._current
         Plugin.load_config()
-        if Plugin._enabled and not prevEnabled:
+        if Plugin._enabled and not prev_enabled:
             await Plugin.apply_shader(self)
-        elif prevEnabled and not Plugin._enabled:
+        elif prev_enabled and not Plugin._enabled:
             await Plugin.toggle_shader(self, "None")
-        elif Plugin._enabled and (Plugin._current != prevCurrent or Plugin._current == "CAS.fx"):
+        elif Plugin._enabled and Plugin._current != prev_current:
+            await Plugin.apply_shader(self, force="false")
+        elif Plugin._enabled and Plugin._current != "None":
+            # Re-apply because changing games may have loaded a different set of
+            # persisted parameters for the same shader.
             await Plugin.apply_shader(self, force="false")
 
     async def set_shader_enabled(self, isEnabled):
         Plugin._enabled = isEnabled
         Plugin.save_config()
 
+    @staticmethod
+    async def _run_shader_script(shader_name: str, force: str = "true"):
+        logger.info("Applying shader " + shader_name)
+        try:
+            env = os.environ.copy()
+            env["LD_LIBRARY_PATH"] = ""
+            args = [shaders_folder + "/set_shader.sh", shader_name, destination_folder]
+            if force is not None:
+                args.append(force)
+            ret = subprocess.run(args, capture_output=True, env=env)
+            logger.info(ret)
+        except Exception:
+            logger.exception("Apply shader")
+
     async def apply_shader(self, force: str = "true"):
         if Plugin._enabled:
             shader = Plugin._current
-            if shader == "CAS.fx":
-                Plugin.save_config()
-                await Plugin.update_cas_shader(self)
-            logger.info("Applying shader " + shader)
-            try:
-                env = os.environ.copy()
-                env["LD_LIBRARY_PATH"] = ""
-                ret = subprocess.run([shaders_folder + "/set_shader.sh", shader, destination_folder, force], capture_output=True, env=env)
-                logger.info(ret)
-            except Exception:
-                logger.exception("Apply shader")
+            if shader != "None":
+                Plugin._apply_stored_parameters(shader)
+            Plugin.save_config()
+            await Plugin._run_shader_script(shader, force)
 
     async def set_shader(self, shader_name):
         Plugin._current = shader_name
         Plugin.save_config()
         if Plugin._enabled:
-            if shader_name == "CAS.fx":
-                await Plugin.update_cas_shader(self)
-            logger.info("Setting and applying shader " + shader_name)
-            try:
-                env = os.environ.copy()
-                env["LD_LIBRARY_PATH"] = ""
-                ret = subprocess.run([shaders_folder + "/set_shader.sh", shader_name, destination_folder], capture_output=True, env=env)
-                decky_plugin.logger.info(ret)
-            except Exception:
-                decky_plugin.logger.exception("Set shader")
+            if shader_name != "None":
+                Plugin._apply_stored_parameters(shader_name)
+            await Plugin._run_shader_script(shader_name, None)
 
     async def toggle_shader(self, shader_name):
-        if shader_name == "CAS.fx":
-            await Plugin.update_cas_shader(self)
-        logger.info("Applying shader " + shader_name)
-        try:
-            env = os.environ.copy()
-            env["LD_LIBRARY_PATH"] = ""
-            ret = subprocess.run([shaders_folder + "/set_shader.sh", shader_name, destination_folder], capture_output=True, env=env)
-            decky_plugin.logger.info(ret)
-        except Exception:
-            decky_plugin.logger.exception("Toggle shader")
-            
+        if shader_name != "None":
+            Plugin._apply_stored_parameters(shader_name)
+        await Plugin._run_shader_script(shader_name, None)
+
     async def get_current_effect(self):
         try:
             result = subprocess.run(
