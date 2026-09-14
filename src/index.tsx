@@ -27,52 +27,35 @@ interface ShaderParameter {
     step: number;
 }
 
-class ReshadeckLogic {
-    serverAPI: ServerAPI;
-    dataTakenAt: number = Date.now();
-
-    constructor(serverAPI: ServerAPI) {
-        this.serverAPI = serverAPI;
-    }
-
-    handleSuspend = async () => {
-        // Do nothing or log if you want
-    };
-
-    handleResume = async () => {
-//      await this.serverAPI.callPluginMethod("apply_shader", {});
-    };
-}
-
 const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
     const baseShader = { data: "None", label: "No Shader" } as SingleDropdownOption;
     const [shadersEnabled, setShadersEnabled] = useState<boolean>(false);
-    const [shader_list, set_shader_list] = useState<string[]>([]);
     const [selectedShader, setSelectedShader] = useState<DropdownOption>(baseShader);
     const [shaderOptions, setShaderOptions] = useState<DropdownOption[]>([baseShader]);
     const [currentGameId, setCurrentGameId] = useState<string>("Unknown");
     const [currentGameName, setCurrentGameName] = useState<string>("Unknown");
     const [currentEffect, setCurrentEffect] = useState<string>("");
     const [shaderParameters, setShaderParameters] = useState<ShaderParameter[]>([]);
-    const parameterTimeouts = useRef<Record<string, number>>({});
-    const [applyDisabled, setApplyDisabled] = useState(false);
+    const parameterTimeout = useRef<number | null>(null);
+    const pendingParameterValues = useRef<Record<string, number>>({});
+    const [reloadDisabled, setReloadDisabled] = useState(false);
     const [resetDisabled, setResetDisabled] = useState(false);
-
     const [refreshVersion, setRefreshVersion] = useState(0);
 
-    const clearParameterTimeouts = () => {
-        Object.values(parameterTimeouts.current).forEach(timeout => clearTimeout(timeout));
-        parameterTimeouts.current = {};
+    const clearParameterTimeout = () => {
+        if (parameterTimeout.current !== null) {
+            clearTimeout(parameterTimeout.current);
+            parameterTimeout.current = null;
+        }
+        pendingParameterValues.current = {};
     };
 
     forceRefreshContent = () => setRefreshVersion(v => v + 1);
 
-    const getShaderOptions = (le_list: string[], baseShaderOrSS: any) => {
-        let options: DropdownOption[] = [];
-        options.push(baseShaderOrSS);
-        for (let i = 0; i < le_list.length; i++) {
-            let option = { data: le_list[i], label: le_list[i] } as SingleDropdownOption;
-            options.push(option);
+    const getShaderOptions = (shaderList: string[], baseShaderOption: any) => {
+        const options: DropdownOption[] = [baseShaderOption];
+        for (const shader of shaderList) {
+            options.push({ data: shader, label: shader } as SingleDropdownOption);
         }
         return options;
     };
@@ -112,15 +95,14 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         // This is the single frontend path that updates backend game state.
         await refreshCurrentGameInfo();
 
-        let shaderList = (await serverAPI.callPluginMethod("get_shader_list", {})).result as string[];
-        set_shader_list(shaderList);
+        const shaderList = (await serverAPI.callPluginMethod("get_shader_list", {})).result as string[];
         setShaderOptions(getShaderOptions(shaderList, baseShader));
 
-        let enabledResp = await serverAPI.callPluginMethod("get_shader_enabled", {});
-        let isEnabled: boolean = enabledResp.result === true || enabledResp.result === "true";
+        const enabledResp = await serverAPI.callPluginMethod("get_shader_enabled", {});
+        const isEnabled: boolean = enabledResp.result === true || enabledResp.result === "true";
         setShadersEnabled(isEnabled);
 
-        let curr = await serverAPI.callPluginMethod("get_current_shader", {});
+        const curr = await serverAPI.callPluginMethod("get_current_shader", {});
         const currentShader = String(curr.result || "None");
         setSelectedShader({
             data: currentShader,
@@ -128,7 +110,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         } as SingleDropdownOption);
         await loadShaderParameters(currentShader);
 
-        let eff = await serverAPI.callPluginMethod("get_current_effect", {});
+        const eff = await serverAPI.callPluginMethod("get_current_effect", {});
         setCurrentEffect((eff.result as { effect: string }).effect || "");
     };
 
@@ -138,7 +120,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 
     useEffect(() => {
         return () => {
-            clearParameterTimeouts();
+            clearParameterTimeout();
         };
     }, []);
 
@@ -173,7 +155,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                         } else {
                             await serverAPI.callPluginMethod("toggle_shader", { shader_name: "None" });
                         }
-                        let eff = await serverAPI.callPluginMethod("get_current_effect", {});
+                        const eff = await serverAPI.callPluginMethod("get_current_effect", {});
                         setCurrentEffect((eff.result as { effect: string }).effect || "");
                     }}
                 />
@@ -188,27 +170,32 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                     rgOptions={shaderOptions}
                     selectedOption={selectedShader}
                     onChange={async (newSelectedShader: DropdownOption) => {
-                        clearParameterTimeouts();
+                        clearParameterTimeout();
                         setSelectedShader(newSelectedShader);
                         const shaderName = String(newSelectedShader.data);
                         await serverAPI.callPluginMethod("set_shader", { shader_name: shaderName });
                         await loadShaderParameters(shaderName);
-                        let eff = await serverAPI.callPluginMethod("get_current_effect", {});
+                        const eff = await serverAPI.callPluginMethod("get_current_effect", {});
                         setCurrentEffect((eff.result as { effect: string }).effect || "");
                     }}
                 />
             </PanelSectionRow>
             <PanelSectionRow>
                 <ButtonItem
-                    disabled={applyDisabled}
+                    disabled={reloadDisabled}
                     onClick={async () => {
-                        setApplyDisabled(true);
-                        setTimeout(() => setApplyDisabled(false), 1000);
-                        await serverAPI.callPluginMethod("apply_shader", {});
-                        let eff = await serverAPI.callPluginMethod("get_current_effect", {});
-                        setCurrentEffect((eff.result as { effect: string }).effect || "");
+                        setReloadDisabled(true);
+                        try {
+                            await serverAPI.callPluginMethod("apply_shader", {});
+                            const eff = await serverAPI.callPluginMethod("get_current_effect", {});
+                            setCurrentEffect((eff.result as { effect: string }).effect || "");
+                        } catch (error) {
+                            console.error(error);
+                        } finally {
+                            setReloadDisabled(false);
+                        }
                     }}
-                >Apply Shader</ButtonItem>
+                >Reload Shader</ButtonItem>
             </PanelSectionRow>
 
             {shaderParameters.length > 0 && (
@@ -241,24 +228,26 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                                     item.name === parameter.name ? { ...item, value: realValue } : item
                                 ));
 
-                                const shaderName = String(selectedShader.data);
-                                const timeoutKey = `${shaderName}:${parameter.name}`;
-                                if (parameterTimeouts.current[timeoutKey]) {
-                                    clearTimeout(parameterTimeouts.current[timeoutKey]);
+                                pendingParameterValues.current[parameter.name] = realValue;
+                                if (parameterTimeout.current !== null) {
+                                    clearTimeout(parameterTimeout.current);
                                 }
-                                parameterTimeouts.current[timeoutKey] = window.setTimeout(async () => {
+
+                                const shaderName = String(selectedShader.data);
+                                parameterTimeout.current = window.setTimeout(async () => {
+                                    const values = { ...pendingParameterValues.current };
+                                    pendingParameterValues.current = {};
+                                    parameterTimeout.current = null;
+
                                     try {
-                                        await serverAPI.callPluginMethod("set_shader_parameter", {
+                                        await serverAPI.callPluginMethod("set_shader_parameters", {
                                             shader_name: shaderName,
-                                            parameter_name: parameter.name,
-                                            value: realValue
+                                            values
                                         });
                                         const eff = await serverAPI.callPluginMethod("get_current_effect", {});
                                         setCurrentEffect((eff.result as { effect: string }).effect || "");
                                     } catch (error) {
                                         console.error(error);
-                                    } finally {
-                                        delete parameterTimeouts.current[timeoutKey];
                                     }
                                 }, 500);
                             }}
@@ -272,7 +261,7 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
                     <ButtonItem
                         disabled={resetDisabled}
                         onClick={async () => {
-                            clearParameterTimeouts();
+                            clearParameterTimeout();
                             setResetDisabled(true);
                             const shaderName = String(selectedShader.data);
                             try {
@@ -303,8 +292,6 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 };
 
 export default definePlugin((serverApi: ServerAPI) => {
-    let logic = new ReshadeckLogic(serverApi);
-
     let lastAppId = `${Router.MainRunningApp?.appid || "Unknown"}`;
     const interval = setInterval(() => {
         const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
