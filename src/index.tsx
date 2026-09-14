@@ -96,8 +96,6 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         setCurrentGameId(appid);
         setCurrentGameName(appname);
 
-        // Lifecycle hooks normally keep backend game state current. This one-shot
-        // sync also recovers if a game-change event was missed.
         await serverAPI.callPluginMethod("set_current_game_info", {
             appid,
             appname
@@ -106,11 +104,6 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 
     const initState = async () => {
         await refreshCurrentGameInfo();
-
-        // Opening the UI is an explicit recovery point. Verify the actual active
-        // shader contents against the saved state and repair only if they differ.
-        const reconcile = await serverAPI.callPluginMethod("reconcile_shader_state", {});
-        const reconciledEffect = (reconcile.result as { effect?: string })?.effect || "";
 
         const shaderList = (await serverAPI.callPluginMethod("get_shader_list", {})).result as string[];
         setShaderOptions(getShaderOptions(shaderList, baseShader));
@@ -127,12 +120,8 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
         } as SingleDropdownOption);
         await loadShaderParameters(currentShader);
 
-        if (reconciledEffect) {
-            setCurrentEffect(reconciledEffect);
-        } else {
-            const eff = await serverAPI.callPluginMethod("get_current_effect", {});
-            setCurrentEffect((eff.result as { effect: string }).effect || "");
-        }
+        const eff = await serverAPI.callPluginMethod("get_current_effect", {});
+        setCurrentEffect((eff.result as { effect: string }).effect || "");
     };
 
     useEffect(() => {
@@ -323,110 +312,28 @@ const Content: VFC<{ serverAPI: ServerAPI }> = ({ serverAPI }) => {
 };
 
 export default definePlugin((serverApi: ServerAPI) => {
-    const getRouterGameInfo = () => ({
-        appid: `${Router.MainRunningApp?.appid || "Unknown"}`,
-        appname: `${Router.MainRunningApp?.display_name || "Unknown"}`
-    });
+    let lastAppId = `${Router.MainRunningApp?.appid || "Unknown"}`;
 
-    let activeAppId = getRouterGameInfo().appid;
+    const interval = setInterval(async () => {
+        const appid = `${Router.MainRunningApp?.appid || "Unknown"}`;
+        const appname = `${Router.MainRunningApp?.display_name || "Unknown"}`;
 
-    const syncGameInfo = async (appid: string, appname: string) => {
-        activeAppId = appid;
-        await serverApi.callPluginMethod("set_current_game_info", {
-            appid,
-            appname
-        });
-        if (forceRefreshContent) forceRefreshContent();
-    };
-
-    const syncFromRouter = async () => {
-        const info = getRouterGameInfo();
-        await syncGameInfo(info.appid, info.appname);
-    };
-
-    const normalizeAppId = (value: any): string | null => {
-        const numeric = Number(value);
-        if (!Number.isFinite(numeric) || numeric === 0) return null;
-        return `${numeric >>> 0}`;
-    };
-
-    const syncStartedApp = (appid: string) => {
-        const routerInfo = getRouterGameInfo();
-        const appname = routerInfo.appid === appid ? routerInfo.appname : "Unknown";
-        void syncGameInfo(appid, appname).catch(error => console.error(error));
-    };
-
-    // One-shot startup reconciliation for plugin reloads while an app is already
-    // running. Normal transitions are event-driven below.
-    void syncFromRouter().catch(error => console.error(error));
-
-    const steamClient = (globalThis as any).SteamClient;
-
-    // App lifetime events are authoritative for normal start/stop transitions and
-    // do not depend on the QAM/Reshadeck panel being mounted.
-    const lifetimeRegistration = steamClient?.GameSessions?.RegisterForAppLifetimeNotifications?.(
-        (notification: any) => {
-            const eventAppId = normalizeAppId(notification?.unAppID);
-
-            if (notification?.bRunning === true) {
-                if (eventAppId) {
-                    syncStartedApp(eventAppId);
-                }
-                // Some Steam builds report 0 for non-Steam shortcuts. In that case
-                // RegisterForGameActionStart below provides the actual AppID.
-                return;
-            }
-
-            if (notification?.bRunning !== false) return;
-
-            if (eventAppId) {
-                // Ignore a late stop for the previous app if a new app has already
-                // started. Otherwise disable the old app's effect immediately.
-                if (eventAppId === activeAppId) {
-                    void syncGameInfo("Unknown", "Unknown")
-                        .catch(error => console.error(error));
-                }
-                return;
-            }
-
-            // Zero-AppID stop notifications cannot identify the app. Delay briefly
-            // so a concurrent start event can win. If no new app starts, clear the
-            // current app. A one-shot Router read is used only to recognize a new
-            // app that is already visible; this is not a polling control path.
-            const stoppedActiveAppId = activeAppId;
-            setTimeout(() => {
-                if (activeAppId !== stoppedActiveAppId) return;
-
-                const routerInfo = getRouterGameInfo();
-                if (routerInfo.appid !== "Unknown" && routerInfo.appid !== stoppedActiveAppId) {
-                    void syncGameInfo(routerInfo.appid, routerInfo.appname)
-                        .catch(error => console.error(error));
-                } else {
-                    void syncGameInfo("Unknown", "Unknown")
-                        .catch(error => console.error(error));
-                }
-            }, 250);
+        if (appid !== lastAppId) {
+            lastAppId = appid;
+            await serverApi.callPluginMethod("set_current_game_info", {
+                appid,
+                appname
+            });
+            if (forceRefreshContent) forceRefreshContent();
         }
-    );
-
-    // Launch events provide the AppID even on Steam builds where lifetime
-    // notifications report 0 for a non-Steam shortcut. A later lifetime event
-    // for the same AppID is harmless because the backend ignores same-AppID syncs.
-    const gameActionRegistration = steamClient?.Apps?.RegisterForGameActionStart?.(
-        (_gameActionId: number, appId: string, action: string) => {
-            if (action !== "LaunchApp") return;
-            const startedAppId = normalizeAppId(appId);
-            if (startedAppId) syncStartedApp(startedAppId);
-        }
-    );
+    }, 5000);
 
     return {
         title: <div className={staticClasses.Title}>Reshadeck</div>,
         content: <Content serverAPI={serverApi} />,
         icon: <MdWbShade />,
         onDismount() {
-            lifetimeRegistration?.unregister?.();
-            gameActionRegistration?.unregister?.();
+            clearInterval(interval);
         },
         alwaysRender: true
     };
